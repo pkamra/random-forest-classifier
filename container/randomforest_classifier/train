@@ -1,0 +1,112 @@
+#!/usr/bin/env python
+
+import os
+import sys
+import joblib
+import pandas as pd
+import traceback
+
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
+
+# Define SageMaker paths
+prefix = '/opt/ml/'
+
+input_path = prefix + 'input/data'
+output_path = os.path.join(prefix, 'output')
+model_path = os.path.join(prefix, 'model')
+scaling_model_path = os.path.join(prefix, 'scaling_model')  # Path to the directory containing the scaler.joblib
+
+# Define input channel
+channel_name = 'training'
+training_path = os.path.join(input_path, channel_name)
+
+# Function to execute training
+def train():
+    print('Starting the training.')
+    try:
+        # Load the pre-trained scaler
+        scaler_filename = os.path.join(scaling_model_path, 'scaler.joblib')
+        if not os.path.exists(scaler_filename):
+            raise ValueError(f'Scaler file not found: {scaler_filename}')
+        
+        scaler = joblib.load(scaler_filename)
+        print(f"Loaded scaler from: {scaler_filename}")
+
+        # Read CSV files from the training path
+        input_files = [os.path.join(training_path, file) for file in os.listdir(training_path) if file.endswith(".csv")]
+        if not input_files:
+            raise ValueError(f'No CSV files found in {training_path}. Check your data input path and permissions.')
+
+        # Concatenate all CSV files into a single DataFrame
+        raw_data = [pd.read_csv(file) for file in input_files]
+        train_data = pd.concat(raw_data, ignore_index=True)
+
+        # Check if the DataFrame is empty
+        if train_data.empty:
+            raise ValueError('Training data is empty. Ensure data is correctly uploaded.')
+
+        # One-hot encode the 'Employment Status' feature
+        employment_status_encoded = pd.get_dummies(train_data['Employment Status'])
+        train_data = pd.concat([train_data, employment_status_encoded], axis=1)
+        train_data[employment_status_encoded.columns] = train_data[employment_status_encoded.columns].astype(int)
+        train_data.drop('Employment Status', axis=1, inplace=True)
+
+        # Define the features and target variable
+        features_to_standardize = ['Age', 'Annual Income', 'Credit Score', 
+                                   'Years at Current Residence', 'Number of Defaults', 'Loan Amount'] + list(employment_status_encoded.columns)
+        X = train_data[features_to_standardize]
+        y = train_data['Risk Category']
+
+        # Split the data into training and testing sets
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+        # Scale the training and testing data using the loaded scaler
+        X_train_scaled = scaler.transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+
+        # Initialize the Random Forest Classifier
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+
+        # Train the model on the scaled training data
+        model.fit(X_train_scaled, y_train)
+
+        # Evaluate the model
+        predictions = model.predict(X_test_scaled)
+        accuracy = accuracy_score(y_test, predictions)
+        print(f'Model Accuracy: {accuracy:.2f}')
+
+
+        # Combine original test data with predictions
+        test_data_with_predictions = X_test.copy()  # Copy the original test data
+        test_data_with_predictions['Predicted Risk Category'] = predictions  # Add the predictions
+
+        # Reorder columns to put 'Predicted Risk Category' at the end
+        original_cols = list(test_data_with_predictions.columns)
+        original_cols.append(original_cols.pop(original_cols.index('Predicted Risk Category')))
+        test_data_with_predictions = test_data_with_predictions[original_cols]
+
+        # Print the test data with predictions
+        print("\nTest Data with Predicted Risk Category:")
+        print(test_data_with_predictions.head())
+
+
+        # Save the trained model
+        model_filename = os.path.join(model_path, 'random-forest-model.joblib')
+        joblib.dump(model, model_filename)
+
+        print(f"Model saved as: {model_filename}")
+
+    except Exception as e:
+        # Write an error file for failure description
+        trc = traceback.format_exc()
+        with open(os.path.join(output_path, 'failure'), 'w') as s:
+            s.write('Exception during training: ' + str(e) + '\n' + trc)
+
+        print('Exception during training: ' + str(e) + '\n' + trc, file=sys.stderr)
+        sys.exit(255)
+
+if __name__ == '__main__':
+    train()
+    sys.exit(0)  # Indicate success
