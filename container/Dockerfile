@@ -44,6 +44,6 @@ ENV PYTHONDONTWRITEBYTECODE=TRUE
 ENV PATH="/opt/program:${PATH}"
 
 # Set up the program in the image
-COPY custom_scaling /opt/program
+COPY randomforest_classifier /opt/program
 WORKDIR /opt/program
 
